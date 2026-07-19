@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/chatbi_logo.png" width="120" alt="ChatBI logo" />
+</p>
+
+# ChatBI
+
 # ChatBI (NL → SQL Data Analyst Assistant)
 
 A Streamlit app that lets a user ask business questions in plain English
