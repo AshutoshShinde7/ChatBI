@@ -7,11 +7,20 @@ from groq import Groq
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="ChatBI", page_icon="assets/favicon.ico", layout="wide")
-col1, col2 = st.columns([1, 5], vertical_alignment="center")
-with col1:
-    st.image("assets/chatbi_logo_200.png", width=70)
-with col2:
-    st.title("ChatBI")
+
+import base64
+with open("assets/chatbi_logo_200.png", "rb") as f:
+    logo_b64 = base64.b64encode(f.read()).decode()
+
+st.markdown(
+    f"""
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:0.5rem;">
+        <img src="data:image/png;base64,{logo_b64}" width="55">
+        <h1 style="margin:0; padding:0;">ChatBI</h1>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 st.caption("Ask questions in plain English. ChatBI converts them to SQL, runs them, and shows results + a chart.")
 
 # ---------- DB SETUP ----------
