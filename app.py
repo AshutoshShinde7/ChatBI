@@ -6,11 +6,11 @@ import os
 from groq import Groq
 
 # ---------- PAGE CONFIG ----------
-st.set_page_config(page_title="ChatBI", page_icon="assets/chatbi_logo.png", layout="wide")
+st.set_page_config(page_title="ChatBI", page_icon="assets/favicon.ico", layout="wide")
 # st.title("📊 ChatBI")
 col1, col2 = st.columns([1, 8])
 with col1:
-    st.image("assets/chatbi_logo.png", width=60)
+    st.image("assets/chatbi_logo_200.png", width=60)
 with col2:
     st.title("ChatBI")
 st.caption("Ask questions in plain English. ChatBI converts them to SQL, runs them, and shows results + a chart.")

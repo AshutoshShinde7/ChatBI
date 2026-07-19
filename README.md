@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/chatbi_logo.png" width="120" alt="ChatBI logo" />
+  <img src="assets/chatbi_logo_512.png" width="120" alt="ChatBI logo" />
 </p>
 
 # ChatBI
