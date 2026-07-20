@@ -77,10 +77,20 @@ st.sidebar.dataframe(schema_df[["name", "type"]], hide_index=True)
 api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 client = Groq(api_key=api_key) if api_key else None
 
-def nl_to_sql(question: str, schema: pd.DataFrame) -> str:
-    """Ask a Groq-hosted model to turn a natural-language question into a SQLite query."""
+def nl_to_sql(question: str, schema: pd.DataFrame, previous_sql: str = None, previous_error: str = None) -> str:
+    """Ask a Groq-hosted model to turn a natural-language question into a SQLite query.
+    If previous_sql/previous_error are given, the model is asked to fix its earlier mistake."""
     columns = ", ".join(f"{r['name']} ({r['type']})" for _, r in schema.iterrows())
-    prompt = f"""You are a SQL expert. Table name: sales. Columns: {columns}.
+    if previous_sql and previous_error:
+        prompt = f"""You are a SQL expert. Table name: sales. Columns: {columns}.
+The question is: "{question}"
+Your previous SQL attempt failed:
+SQL: {previous_sql}
+Error: {previous_error}
+Write ONE corrected SQLite query that fixes this error and answers the question.
+Rules: return ONLY the SQL query, no explanation, no markdown fences."""
+    else:
+        prompt = f"""You are a SQL expert. Table name: sales. Columns: {columns}.
 Write ONE SQLite query that answers this question: "{question}"
 Rules: return ONLY the SQL query, no explanation, no markdown fences, no semicolon-terminated comments."""
     resp = client.chat.completions.create(
@@ -92,6 +102,45 @@ Rules: return ONLY the SQL query, no explanation, no markdown fences, no semicol
     sql = re.sub(r"^```sql|```$", "", sql, flags=re.MULTILINE).strip()
     return sql
 
+# ---------- GUARDRAIL ----------
+FORBIDDEN_KEYWORDS = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "REPLACE", "ATTACH", "PRAGMA"]
+
+def is_safe_sql(sql: str) -> bool:
+    """Reject any query containing destructive or non-read-only keywords."""
+    upper_sql = sql.upper()
+    return not any(re.search(rf"\b{kw}\b", upper_sql) for kw in FORBIDDEN_KEYWORDS)
+
+# ---------- RETRY-ON-ERROR EXECUTION ----------
+def run_query_with_retry(question: str, schema: pd.DataFrame, conn, max_retries: int = 1):
+    """Generate SQL, validate it, run it, and retry once with the error fed back to the model if it fails."""
+    sql = nl_to_sql(question, schema)
+    last_error = None
+    for attempt in range(max_retries + 1):
+        if not is_safe_sql(sql):
+            return sql, None, "Blocked: generated SQL contained a non-read-only statement."
+        try:
+            df = pd.read_sql(sql, conn)
+            return sql, df, None
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                sql = nl_to_sql(question, schema, previous_sql=sql, previous_error=last_error)
+    return sql, None, last_error
+
+# ---------- RESULT SUMMARY (uses a smaller/faster model — cheaper for a simple task) ----------
+def summarize_result(question: str, df: pd.DataFrame) -> str:
+    preview = df.head(20).to_csv(index=False)
+    prompt = f"""Question asked: "{question}"
+Result data (CSV, up to 20 rows):
+{preview}
+Write a 2-3 sentence plain-English summary of what this data shows. Mention the key number(s) or trend. No preamble, just the summary."""
+    resp = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        max_tokens=150,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.choices[0].message.content.strip()
+
 # ---------- CHAT UI ----------
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -101,36 +150,37 @@ question = st.chat_input("e.g. What is the total revenue by region?")
 if question:
     st.session_state.history.append(("user", question))
     if not client:
-        answer_sql = None
-        error = "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot."
+        sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
     else:
-        try:
-            answer_sql = nl_to_sql(question, schema_df)
-            error = None
-        except Exception as e:
-            answer_sql, error = None, str(e)
-    st.session_state.history.append(("assistant_sql", answer_sql, error))
+        with st.spinner("Thinking..."):
+            sql, result, error = run_query_with_retry(question, schema_df, conn)
+            summary = None
+            if result is not None and not result.empty:
+                try:
+                    summary = summarize_result(question, result)
+                except Exception:
+                    summary = None
+    st.session_state.history.append(("assistant", sql, result, error, summary))
 
 for entry in st.session_state.history:
     if entry[0] == "user":
         with st.chat_message("user"):
             st.write(entry[1])
     else:
-        _, sql, error = entry
+        _, sql, result, error, summary = entry
         with st.chat_message("assistant"):
             if error:
                 st.error(error)
-            elif sql:
+            if sql:
                 st.code(sql, language="sql")
-                try:
-                    result = pd.read_sql(sql, conn)
-                    st.dataframe(result, use_container_width=True)
-                    numeric_cols = result.select_dtypes("number").columns
-                    if len(result.columns) >= 2 and len(numeric_cols) >= 1:
-                        label_col = [c for c in result.columns if c not in numeric_cols][0] if len(result.columns) > len(numeric_cols) else result.columns[0]
-                        st.bar_chart(result, x=label_col, y=numeric_cols[0])
-                except Exception as e:
-                    st.error(f"Query failed: {e}")
+            if result is not None:
+                if summary:
+                    st.markdown(f"**Summary:** {summary}")
+                st.dataframe(result, use_container_width=True)
+                numeric_cols = result.select_dtypes("number").columns
+                if len(result.columns) >= 2 and len(numeric_cols) >= 1:
+                    label_col = [c for c in result.columns if c not in numeric_cols][0] if len(result.columns) > len(numeric_cols) else result.columns[0]
+                    st.bar_chart(result, x=label_col, y=numeric_cols[0])
 
 st.divider()
 st.caption("ChatBI — built with Streamlit + Groq API (Llama 3.3) + SQLite. Portfolio project by Ashutosh Shinde.")
