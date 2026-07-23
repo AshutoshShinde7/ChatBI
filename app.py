@@ -150,19 +150,28 @@ def route_message(message: str, context: list = None):
     history_note = ""
     if context:
         last_q = context[-1]["question"]
-        history_note = f' The user was just asking about: "{last_q}".'
+        history_note = f' They were just asking about: "{last_q}".'
 
-    prompt = f"""You are ChatBI, a friendly data analyst assistant chatting with a user about their dataset.
-Message from user: "{message}"{history_note}
+    prompt = f"""You're ChatBI, texting back and forth with someone about their data. You're sharp and easygoing, like a coworker who's good with numbers, not a customer service bot.
 
-Decide: is this a data question that requires querying the dataset (asking for numbers, totals, comparisons, trends, records, etc.), or is it small talk / a greeting / thanks / a general question about what you can do?
+They just said: "{message}"{history_note}
 
-If it is a DATA QUESTION, respond with exactly: DATA_QUESTION
-If it is SMALL TALK, reply naturally and warmly in 1-2 sentences, as yourself (ChatBI). If they're greeting you or asking what you can do, briefly mention you can answer questions about their data and forecast trends. Don't be robotic — talk like a helpful person, not a report."""
+First, decide: are they asking an actual data question (numbers, totals, comparisons, trends, records) or just talking to you (greeting, thanks, "what can you do", small talk)?
+
+If it's a DATA QUESTION, reply with exactly: DATA_QUESTION
+
+If it's SMALL TALK, just reply like a person would over text. Rules:
+- Use contractions (I'm, you're, that's, don't)
+- Keep it short — one sentence is often enough, two max
+- No corporate phrases: never say "I'm here to help", "feel free to", "I'd be happy to", "let me know if you have any questions"
+- Don't over-explain what you are or list your features unless they actually asked what you can do
+- Match their energy — if they're casual, be casual; if it's just "hi", a plain "hey, what's up?" or "hey! what do you want to know?" is enough
+- Vary your phrasing — don't reuse the same opener every time"""
 
     resp = client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        max_tokens=120,
+        max_tokens=100,
+        temperature=1.0,
         messages=[{"role": "user", "content": prompt}],
     )
     reply = resp.choices[0].message.content.strip()
@@ -173,13 +182,22 @@ If it is SMALL TALK, reply naturally and warmly in 1-2 sentences, as yourself (C
 # ---------- RESULT SUMMARY (uses a smaller/faster model — cheaper for a simple task) ----------
 def summarize_result(question: str, df: pd.DataFrame) -> str:
     preview = df.head(20).to_csv(index=False)
-    prompt = f"""You are ChatBI, chatting with a user about their data. They just asked: "{question}"
-Here's the result data (CSV, up to 20 rows):
+    prompt = f"""You're ChatBI, texting someone the answer to a question about their data. They asked: "{question}"
+
+Here's what the query returned (CSV, up to 20 rows):
 {preview}
-Reply like you're talking directly to them — 2-3 sentences, conversational tone, not a formal report. Mention the key number(s) or trend directly, as if you're pointing it out to a colleague. You can start naturally (e.g. "Looks like...", "So...", "Here's what stands out...") instead of a dry restatement of the question."""
+
+Tell them what it shows, like you're glancing at the numbers and casually pointing out what matters — 1-3 sentences. Rules:
+- Use contractions and everyday words
+- Lead with the actual number or finding, not a restatement of their question
+- No corporate/report phrasing — avoid "the data indicates", "it can be observed that", "in summary", "overall"
+- Don't repeat the question back to them
+- If something stands out (a big gap, a surprising leader, a clear trend), react to it naturally instead of just listing facts
+- Vary how you open — don't always start with the same word or phrase"""
     resp = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         max_tokens=150,
+        temperature=1.0,
         messages=[{"role": "user", "content": prompt}],
     )
     return resp.choices[0].message.content.strip()
@@ -296,7 +314,7 @@ tab_chat, tab_forecast = st.tabs(["💬 Ask a Question", "📈 Forecast"])
 with tab_chat:
     if not st.session_state.history:
         with st.chat_message("assistant"):
-            st.write("Hey! I'm ChatBI 👋 Ask me anything about your data — totals, trends, comparisons, whatever you're curious about. I can also forecast a metric forward if you head to the Forecast tab.")
+            st.write("Hey! Ask me anything about your data — I'll dig up the numbers. There's also a Forecast tab if you want to project something forward.")
     for entry in st.session_state.history:
         if entry[0] == "user":
             with st.chat_message("user"):
