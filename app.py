@@ -80,13 +80,24 @@ st.sidebar.dataframe(schema_df[["name", "type"]], hide_index=True)
 api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 client = Groq(api_key=api_key) if api_key else None
 
-def nl_to_sql(question: str, schema: pd.DataFrame, previous_sql: str = None, previous_error: str = None) -> str:
+def nl_to_sql(question: str, schema: pd.DataFrame, previous_sql: str = None, previous_error: str = None, context: list = None) -> str:
     """Ask a Groq-hosted model to turn a natural-language question into a SQLite query.
-    If previous_sql/previous_error are given, the model is asked to fix its earlier mistake."""
+    - If previous_sql/previous_error are given, the model is asked to fix its earlier mistake (error-retry path).
+    - If context is given (list of {"question":.., "sql":..} dicts, most recent last), the model is told about
+      the recent conversation so follow-ups like "now break that down by category" resolve correctly."""
     columns = ", ".join(f"{r['name']} ({r['type']})" for _, r in schema.iterrows())
+
+    context_block = ""
+    if context:
+        turns = "\n".join(f'- Q: "{c["question"]}" -> SQL: {c["sql"]}' for c in context)
+        context_block = f"""Recent conversation for context (the new question may refer back to these, e.g. "that", "those", "instead", "now break it down by X"):
+{turns}
+
+"""
+
     if previous_sql and previous_error:
         prompt = f"""You are a SQL expert. Table name: sales. Columns: {columns}.
-The question is: "{question}"
+{context_block}The question is: "{question}"
 Your previous SQL attempt failed:
 SQL: {previous_sql}
 Error: {previous_error}
@@ -94,7 +105,8 @@ Write ONE corrected SQLite query that fixes this error and answers the question.
 Rules: return ONLY the SQL query, no explanation, no markdown fences."""
     else:
         prompt = f"""You are a SQL expert. Table name: sales. Columns: {columns}.
-Write ONE SQLite query that answers this question: "{question}"
+{context_block}Write ONE SQLite query that answers this question: "{question}"
+If the question refers to a previous result (e.g. "that", "those", "now by category"), use the recent conversation above to resolve what it means.
 Rules: return ONLY the SQL query, no explanation, no markdown fences, no semicolon-terminated comments."""
     resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -114,9 +126,9 @@ def is_safe_sql(sql: str) -> bool:
     return not any(re.search(rf"\b{kw}\b", upper_sql) for kw in FORBIDDEN_KEYWORDS)
 
 # ---------- RETRY-ON-ERROR EXECUTION ----------
-def run_query_with_retry(question: str, schema: pd.DataFrame, conn, max_retries: int = 1):
+def run_query_with_retry(question: str, schema: pd.DataFrame, conn, max_retries: int = 1, context: list = None):
     """Generate SQL, validate it, run it, and retry once with the error fed back to the model if it fails."""
-    sql = nl_to_sql(question, schema)
+    sql = nl_to_sql(question, schema, context=context)
     last_error = None
     for attempt in range(max_retries + 1):
         if not is_safe_sql(sql):
@@ -191,15 +203,29 @@ with tab_chat:
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
 
+    def get_recent_context(n: int = 2):
+        """Pull the last n successful Q->SQL exchanges from history so follow-up questions
+        (e.g. 'now break that down by category') can be resolved against what was just asked."""
+        pairs = []
+        h = st.session_state.history
+        for i in range(len(h) - 1):
+            if h[i][0] == "user" and h[i + 1][0] == "assistant":
+                q = h[i][1]
+                _, sql, result, error, _ = h[i + 1]
+                if sql and error is None:
+                    pairs.append({"question": q, "sql": sql})
+        return pairs[-n:]
+
     def process_question(q: str):
         """Runs a question through the pipeline and stores the result in history.
         SQL is kept internally (still generated, still executed) but never shown to the user."""
+        context = get_recent_context()
         st.session_state.history.append(("user", q))
         if not client:
             sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
         else:
             with st.spinner("Thinking..."):
-                sql, result, error = run_query_with_retry(q, schema_df, conn)
+                sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
                 summary = None
                 if result is not None and not result.empty:
                     try:
@@ -208,19 +234,18 @@ with tab_chat:
                         summary = None
         st.session_state.history.append(("assistant", sql, result, error, summary))
 
-    # Suggested prompt buttons — only show before the first question, to keep things tidy after that
-    if not st.session_state.history:
-        st.caption("Try one of these, or type your own question below:")
-        suggested = [
-            "What is the total revenue by region?",
-            "What are the top 5 products by sales?",
-            "Which category has the highest profit?",
-            "Show total sales by month.",
-        ]
-        cols = st.columns(len(suggested))
-        for col, sq in zip(cols, suggested):
-            if col.button(sq, use_container_width=True):
-                st.session_state.pending_question = sq
+    # Suggested prompt buttons — always available, not just on first load
+    st.caption("Try one of these, or type your own question below:")
+    suggested = [
+        "What is the total revenue by region?",
+        "What are the top 5 products by sales?",
+        "Which category has the highest profit?",
+        "Show total sales by month.",
+    ]
+    cols = st.columns(len(suggested))
+    for col, sq in zip(cols, suggested):
+        if col.button(sq, use_container_width=True):
+            st.session_state.pending_question = sq
 
     question = st.chat_input("e.g. What is the total revenue by region?")
 
@@ -278,6 +303,3 @@ with tab_forecast:
                 st.dataframe(future.rename(columns={"value": f"forecasted_{value_col}"}), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Couldn't generate a forecast: {e}")
-
-st.divider()
-st.caption("ChatBI — built with Streamlit + Groq API (Llama 3.3) + SQLite + scikit-learn. Portfolio project by Ashutosh Shinde.")
