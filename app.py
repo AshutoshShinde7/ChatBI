@@ -260,12 +260,6 @@ def swap_suggestion(slot_index: int, clicked_question: str):
 tab_chat, tab_forecast = st.tabs(["💬 Ask a Question", "📈 Forecast"])
 
 with tab_chat:
-    st.caption("Try one of these, or type your own question below:")
-    cols = st.columns(len(st.session_state.suggested_questions))
-    for i, (col, sq) in enumerate(zip(cols, st.session_state.suggested_questions)):
-        if col.button(sq, use_container_width=True, key=f"suggestion_{i}"):
-            swap_suggestion(i, sq)
-
     for entry in st.session_state.history:
         if entry[0] == "user":
             with st.chat_message("user"):
@@ -313,7 +307,13 @@ with tab_forecast:
             except Exception as e:
                 st.error(f"Couldn't generate a forecast: {e}")
 
-# ---------- CHAT INPUT (top-level, outside tabs — this is what makes it pin to the bottom of the page) ----------
+# ---------- SUGGESTED PROMPTS + CHAT INPUT (both top-level, so they sit together at the bottom of the page) ----------
+st.caption("Try one of these, or type your own question below:")
+cols = st.columns(len(st.session_state.suggested_questions))
+for i, (col, sq) in enumerate(zip(cols, st.session_state.suggested_questions)):
+    if col.button(sq, use_container_width=True, key=f"suggestion_{i}"):
+        swap_suggestion(i, sq)
+
 question = st.chat_input("e.g. What is the total revenue by region?")
 
 if question:
