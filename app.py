@@ -193,89 +193,78 @@ def make_forecast(df: pd.DataFrame, date_col: str, value_col: str, periods: int,
     combined = pd.concat([history, future], ignore_index=True)
     return combined, mae, future
 
+# ---------- CHAT STATE + HELPERS (top-level, so chat_input below can pin to the page bottom) ----------
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+
+SUGGESTION_POOL = [
+    "What is the total revenue by region?",
+    "What are the top 5 products by sales?",
+    "Which category has the highest profit?",
+    "Show total sales by month.",
+    "Which region has the most orders?",
+    "What is the average order value by category?",
+    "Which product has the lowest profit margin?",
+    "Show total profit by region for this year.",
+    "What are the top 3 categories by revenue?",
+    "Which month had the highest sales?",
+]
+if "suggested_questions" not in st.session_state:
+    st.session_state.suggested_questions = SUGGESTION_POOL[:4]
+
+def get_recent_context(n: int = 2):
+    """Pull the last n successful Q->SQL exchanges from history so follow-up questions
+    (e.g. 'now break that down by category') can be resolved against what was just asked."""
+    pairs = []
+    h = st.session_state.history
+    for i in range(len(h) - 1):
+        if h[i][0] == "user" and h[i + 1][0] == "assistant":
+            q = h[i][1]
+            _, sql, result, error, _ = h[i + 1]
+            if sql and error is None:
+                pairs.append({"question": q, "sql": sql})
+    return pairs[-n:]
+
+def process_question(q: str):
+    """Runs a question through the pipeline and stores the result in history.
+    SQL is kept internally (still generated, still executed) but never shown to the user."""
+    context = get_recent_context()
+    st.session_state.history.append(("user", q))
+    if not client:
+        sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
+    else:
+        with st.spinner("Thinking..."):
+            sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
+            summary = None
+            if result is not None and not result.empty:
+                try:
+                    summary = summarize_result(q, result)
+                except Exception:
+                    summary = None
+    st.session_state.history.append(("assistant", sql, result, error, summary))
+
+def swap_suggestion(slot_index: int, clicked_question: str):
+    """Sends the clicked question to chat, then replaces ONLY that slot with an unused question
+    (rebuilds the list explicitly rather than mutating in place, to avoid any stale-reference issues)."""
+    st.session_state.pending_question = clicked_question
+    used = set(st.session_state.suggested_questions)
+    remaining = [q for q in SUGGESTION_POOL if q not in used]
+    new_list = list(st.session_state.suggested_questions)
+    if remaining:
+        new_list[slot_index] = remaining[0]
+    st.session_state.suggested_questions = new_list
+
 # ---------- TABS: CHAT + FORECAST ----------
 tab_chat, tab_forecast = st.tabs(["💬 Ask a Question", "📈 Forecast"])
 
 with tab_chat:
-    # ---------- CHAT UI ----------
-    if "history" not in st.session_state:
-        st.session_state.history = []
-    if "pending_question" not in st.session_state:
-        st.session_state.pending_question = None
-
-    def get_recent_context(n: int = 2):
-        """Pull the last n successful Q->SQL exchanges from history so follow-up questions
-        (e.g. 'now break that down by category') can be resolved against what was just asked."""
-        pairs = []
-        h = st.session_state.history
-        for i in range(len(h) - 1):
-            if h[i][0] == "user" and h[i + 1][0] == "assistant":
-                q = h[i][1]
-                _, sql, result, error, _ = h[i + 1]
-                if sql and error is None:
-                    pairs.append({"question": q, "sql": sql})
-        return pairs[-n:]
-
-    def process_question(q: str):
-        """Runs a question through the pipeline and stores the result in history.
-        SQL is kept internally (still generated, still executed) but never shown to the user."""
-        context = get_recent_context()
-        st.session_state.history.append(("user", q))
-        if not client:
-            sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
-        else:
-            with st.spinner("Thinking..."):
-                sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
-                summary = None
-                if result is not None and not result.empty:
-                    try:
-                        summary = summarize_result(q, result)
-                    except Exception:
-                        summary = None
-        st.session_state.history.append(("assistant", sql, result, error, summary))
-
-    # Suggested prompt buttons — clicking one replaces ONLY that slot with a fresh question,
-    # the other three stay exactly as they were.
-    SUGGESTION_POOL = [
-        "What is the total revenue by region?",
-        "What are the top 5 products by sales?",
-        "Which category has the highest profit?",
-        "Show total sales by month.",
-        "Which region has the most orders?",
-        "What is the average order value by category?",
-        "Which product has the lowest profit margin?",
-        "Show total profit by region for this year.",
-        "What are the top 3 categories by revenue?",
-        "Which month had the highest sales?",
-    ]
-
-    if "suggested_questions" not in st.session_state:
-        st.session_state.suggested_questions = SUGGESTION_POOL[:4]
-
-    def swap_suggestion(slot_index: int, clicked_question: str):
-        """Sends the clicked question to chat, then replaces only that slot with an unused question."""
-        st.session_state.pending_question = clicked_question
-        used = set(st.session_state.suggested_questions)
-        remaining = [q for q in SUGGESTION_POOL if q not in used]
-        if remaining:
-            st.session_state.suggested_questions[slot_index] = remaining[0]
-        # if the pool is exhausted, the slot just keeps its current question
-
     st.caption("Try one of these, or type your own question below:")
     cols = st.columns(len(st.session_state.suggested_questions))
     for i, (col, sq) in enumerate(zip(cols, st.session_state.suggested_questions)):
         if col.button(sq, use_container_width=True, key=f"suggestion_{i}"):
             swap_suggestion(i, sq)
-
-    question = st.chat_input("e.g. What is the total revenue by region?")
-
-    if question:
-        st.session_state.pending_question = question
-
-    if st.session_state.pending_question:
-        process_question(st.session_state.pending_question)
-        st.session_state.pending_question = None
-        st.rerun()
 
     for entry in st.session_state.history:
         if entry[0] == "user":
@@ -323,3 +312,14 @@ with tab_forecast:
                 st.dataframe(future.rename(columns={"value": f"forecasted_{value_col}"}), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Couldn't generate a forecast: {e}")
+
+# ---------- CHAT INPUT (top-level, outside tabs — this is what makes it pin to the bottom of the page) ----------
+question = st.chat_input("e.g. What is the total revenue by region?")
+
+if question:
+    st.session_state.pending_question = question
+
+if st.session_state.pending_question:
+    process_question(st.session_state.pending_question)
+    st.session_state.pending_question = None
+    st.rerun()
