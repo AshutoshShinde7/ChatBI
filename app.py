@@ -234,18 +234,38 @@ with tab_chat:
                         summary = None
         st.session_state.history.append(("assistant", sql, result, error, summary))
 
-    # Suggested prompt buttons — always available, not just on first load
-    st.caption("Try one of these, or type your own question below:")
-    suggested = [
+    # Suggested prompt buttons — clicking one replaces ONLY that slot with a fresh question,
+    # the other three stay exactly as they were.
+    SUGGESTION_POOL = [
         "What is the total revenue by region?",
         "What are the top 5 products by sales?",
         "Which category has the highest profit?",
         "Show total sales by month.",
+        "Which region has the most orders?",
+        "What is the average order value by category?",
+        "Which product has the lowest profit margin?",
+        "Show total profit by region for this year.",
+        "What are the top 3 categories by revenue?",
+        "Which month had the highest sales?",
     ]
-    cols = st.columns(len(suggested))
-    for col, sq in zip(cols, suggested):
-        if col.button(sq, use_container_width=True):
-            st.session_state.pending_question = sq
+
+    if "suggested_questions" not in st.session_state:
+        st.session_state.suggested_questions = SUGGESTION_POOL[:4]
+
+    def swap_suggestion(slot_index: int, clicked_question: str):
+        """Sends the clicked question to chat, then replaces only that slot with an unused question."""
+        st.session_state.pending_question = clicked_question
+        used = set(st.session_state.suggested_questions)
+        remaining = [q for q in SUGGESTION_POOL if q not in used]
+        if remaining:
+            st.session_state.suggested_questions[slot_index] = remaining[0]
+        # if the pool is exhausted, the slot just keeps its current question
+
+    st.caption("Try one of these, or type your own question below:")
+    cols = st.columns(len(st.session_state.suggested_questions))
+    for i, (col, sq) in enumerate(zip(cols, st.session_state.suggested_questions)):
+        if col.button(sq, use_container_width=True, key=f"suggestion_{i}"):
+            swap_suggestion(i, sq)
 
     question = st.chat_input("e.g. What is the total revenue by region?")
 
