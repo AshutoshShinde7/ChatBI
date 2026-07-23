@@ -142,35 +142,41 @@ def run_query_with_retry(question: str, schema: pd.DataFrame, conn, max_retries:
                 sql = nl_to_sql(question, schema, previous_sql=sql, previous_error=last_error)
     return sql, None, last_error
 
+# ---------- PERSONA (used so identity questions like "who made you" get a real, consistent answer) ----------
+CHATBI_PERSONA = """You are ChatBI, a natural-language data analyst assistant. Facts about you, if asked:
+- You were built by Ashutosh Shinde, a Data Science graduate, as a portfolio project.
+- You're built with Streamlit for the interface, the Groq API running Llama models for language understanding, and SQLite for querying the data.
+- You can answer questions about the user's uploaded dataset, and forecast a metric forward in time (Forecast tab).
+Only mention these facts if actually asked who made you, what you're built with, or what you can do — don't volunteer this in every reply."""
+
 # ---------- CONVERSATION ROUTER (handles greetings/small talk vs. real data questions) ----------
-def route_message(message: str, context: list = None):
-    """Decides if this is small talk (greeting, thanks, 'what can you do', etc.) or an actual
+def route_message(message: str, transcript: str = ""):
+    """Decides if this is small talk (greeting, thanks, identity questions, etc.) or an actual
     data question. Small talk gets a natural, direct reply — it never hits the SQL pipeline.
     Uses the small/fast model since this is a simple classification+reply task, not query generation."""
-    history_note = ""
-    if context:
-        last_q = context[-1]["question"]
-        history_note = f' They were just asking about: "{last_q}".'
+    transcript_block = f"\nRecent conversation so far:\n{transcript}\n" if transcript else ""
 
-    prompt = f"""You're ChatBI, texting back and forth with someone about their data. You're sharp and easygoing, like a coworker who's good with numbers, not a customer service bot.
+    prompt = f"""{CHATBI_PERSONA}
 
-They just said: "{message}"{history_note}
+You're texting back and forth with someone. You're sharp and easygoing, like a coworker who's good with numbers, not a customer service bot.
+{transcript_block}
+They just said: "{message}"
 
-First, decide: are they asking an actual data question (numbers, totals, comparisons, trends, records) or just talking to you (greeting, thanks, "what can you do", small talk)?
+First, decide: are they asking an actual data question (numbers, totals, comparisons, trends, records about their dataset) or are they just talking to you (greeting, thanks, small talk, or a question about you — like who made you or what you can do)?
 
 If it's a DATA QUESTION, reply with exactly: DATA_QUESTION
 
-If it's SMALL TALK, just reply like a person would over text. Rules:
+If it's NOT a data question, reply like a real person texting back — don't reuse a stock phrase, actually respond to what they said. Rules:
 - Use contractions (I'm, you're, that's, don't)
-- Keep it short — one sentence is often enough, two max
+- Keep it short, usually one sentence
 - No corporate phrases: never say "I'm here to help", "feel free to", "I'd be happy to", "let me know if you have any questions"
-- Don't over-explain what you are or list your features unless they actually asked what you can do
-- Match their energy — if they're casual, be casual; if it's just "hi", a plain "hey, what's up?" or "hey! what do you want to know?" is enough
-- Vary your phrasing — don't reuse the same opener every time"""
+- If they ask who made you, what you're built with, or what you can do, answer using the facts above — briefly, not a full readout
+- Pay attention to the recent conversation above so you don't repeat something you already said
+- Never say the exact same thing twice in a row"""
 
     resp = client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        max_tokens=100,
+        max_tokens=120,
         temperature=1.0,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -273,17 +279,40 @@ def get_recent_context(n: int = 2):
                 pairs.append({"question": q, "sql": sql})
     return pairs[-n:]
 
+def get_raw_transcript(n_turns: int = 4) -> str:
+    """Builds a plain-text version of the last n_turns exchanges (both data questions AND
+    small talk), so the router actually remembers what was just said instead of only
+    knowing about SQL history. This is what fixes repeated/generic small-talk replies."""
+    h = st.session_state.history
+    lines = []
+    for i in range(len(h) - 1):
+        if h[i][0] == "user" and h[i + 1][0] == "assistant":
+            user_msg = h[i][1]
+            _, sql, result, error, summary = h[i + 1]
+            if summary:
+                bot_msg = summary
+            elif error:
+                bot_msg = "(ran into an error)"
+            elif result is not None:
+                bot_msg = "(showed a data table)"
+            else:
+                bot_msg = ""
+            lines.append(f"User: {user_msg}")
+            lines.append(f"You: {bot_msg}")
+    return "\n".join(lines[-(n_turns * 2):])
+
 def process_question(q: str):
     """Runs a question through the pipeline and stores the result in history.
     SQL is kept internally (still generated, still executed) but never shown to the user.
     Small talk / greetings are detected first and answered directly, without touching SQL at all."""
     context = get_recent_context()
+    transcript = get_raw_transcript()
     st.session_state.history.append(("user", q))
     if not client:
         sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
     else:
         with st.spinner("Thinking..."):
-            chat_reply = route_message(q, context=context)
+            chat_reply = route_message(q, transcript=transcript)
             if chat_reply is not None:
                 # Small talk — just a conversational reply, no SQL, no table, no chart
                 sql, result, error, summary = None, None, None, chat_reply
