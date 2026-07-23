@@ -188,23 +188,49 @@ with tab_chat:
     # ---------- CHAT UI ----------
     if "history" not in st.session_state:
         st.session_state.history = []
+    if "pending_question" not in st.session_state:
+        st.session_state.pending_question = None
 
-    question = st.chat_input("e.g. What is the total revenue by region?")
-
-    if question:
-        st.session_state.history.append(("user", question))
+    def process_question(q: str):
+        """Runs a question through the pipeline and stores the result in history.
+        SQL is kept internally (still generated, still executed) but never shown to the user."""
+        st.session_state.history.append(("user", q))
         if not client:
             sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
         else:
             with st.spinner("Thinking..."):
-                sql, result, error = run_query_with_retry(question, schema_df, conn)
+                sql, result, error = run_query_with_retry(q, schema_df, conn)
                 summary = None
                 if result is not None and not result.empty:
                     try:
-                        summary = summarize_result(question, result)
+                        summary = summarize_result(q, result)
                     except Exception:
                         summary = None
         st.session_state.history.append(("assistant", sql, result, error, summary))
+
+    # Suggested prompt buttons — only show before the first question, to keep things tidy after that
+    if not st.session_state.history:
+        st.caption("Try one of these, or type your own question below:")
+        suggested = [
+            "What is the total revenue by region?",
+            "What are the top 5 products by sales?",
+            "Which category has the highest profit?",
+            "Show total sales by month.",
+        ]
+        cols = st.columns(len(suggested))
+        for col, sq in zip(cols, suggested):
+            if col.button(sq, use_container_width=True):
+                st.session_state.pending_question = sq
+
+    question = st.chat_input("e.g. What is the total revenue by region?")
+
+    if question:
+        st.session_state.pending_question = question
+
+    if st.session_state.pending_question:
+        process_question(st.session_state.pending_question)
+        st.session_state.pending_question = None
+        st.rerun()
 
     for entry in st.session_state.history:
         if entry[0] == "user":
@@ -215,8 +241,6 @@ with tab_chat:
             with st.chat_message("assistant"):
                 if error:
                     st.error(error)
-                if sql:
-                    st.code(sql, language="sql")
                 if result is not None:
                     if summary:
                         st.markdown(f"**Summary:** {summary}")
@@ -228,7 +252,6 @@ with tab_chat:
 
 with tab_forecast:
     st.subheader("Forecast a metric forward in time")
-    st.caption("Uses linear regression on historical trend. Accuracy (MAE) is measured on held-out recent data before forecasting forward, so the error estimate is honest rather than assumed.")
 
     full_df = pd.read_sql("SELECT * FROM sales", conn)
     date_candidates = [c for c in full_df.columns if "date" in c.lower()]
@@ -251,10 +274,8 @@ with tab_forecast:
         if st.button("Run forecast"):
             try:
                 combined, mae, future = make_forecast(full_df, date_col, value_col, periods, freq)
-                st.success(f"Forecast complete. Mean Absolute Error on held-out historical data: {mae:,.2f}")
                 st.line_chart(combined, x=date_col, y="value", color="type")
                 st.dataframe(future.rename(columns={"value": f"forecasted_{value_col}"}), use_container_width=True, hide_index=True)
-                st.caption("Note: this is a simple linear-trend model — it captures overall direction well but won't catch seasonality or sudden shifts. Good for demonstrating the forecasting workflow; a production version would use Prophet or ARIMA for seasonal data.")
             except Exception as e:
                 st.error(f"Couldn't generate a forecast: {e}")
 
