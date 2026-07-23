@@ -142,13 +142,41 @@ def run_query_with_retry(question: str, schema: pd.DataFrame, conn, max_retries:
                 sql = nl_to_sql(question, schema, previous_sql=sql, previous_error=last_error)
     return sql, None, last_error
 
+# ---------- CONVERSATION ROUTER (handles greetings/small talk vs. real data questions) ----------
+def route_message(message: str, context: list = None):
+    """Decides if this is small talk (greeting, thanks, 'what can you do', etc.) or an actual
+    data question. Small talk gets a natural, direct reply — it never hits the SQL pipeline.
+    Uses the small/fast model since this is a simple classification+reply task, not query generation."""
+    history_note = ""
+    if context:
+        last_q = context[-1]["question"]
+        history_note = f' The user was just asking about: "{last_q}".'
+
+    prompt = f"""You are ChatBI, a friendly data analyst assistant chatting with a user about their dataset.
+Message from user: "{message}"{history_note}
+
+Decide: is this a data question that requires querying the dataset (asking for numbers, totals, comparisons, trends, records, etc.), or is it small talk / a greeting / thanks / a general question about what you can do?
+
+If it is a DATA QUESTION, respond with exactly: DATA_QUESTION
+If it is SMALL TALK, reply naturally and warmly in 1-2 sentences, as yourself (ChatBI). If they're greeting you or asking what you can do, briefly mention you can answer questions about their data and forecast trends. Don't be robotic — talk like a helpful person, not a report."""
+
+    resp = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        max_tokens=120,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    reply = resp.choices[0].message.content.strip()
+    if reply.upper().startswith("DATA_QUESTION"):
+        return None  # signals: proceed to the SQL pipeline
+    return reply
+
 # ---------- RESULT SUMMARY (uses a smaller/faster model — cheaper for a simple task) ----------
 def summarize_result(question: str, df: pd.DataFrame) -> str:
     preview = df.head(20).to_csv(index=False)
-    prompt = f"""Question asked: "{question}"
-Result data (CSV, up to 20 rows):
+    prompt = f"""You are ChatBI, chatting with a user about their data. They just asked: "{question}"
+Here's the result data (CSV, up to 20 rows):
 {preview}
-Write a 2-3 sentence plain-English summary of what this data shows. Mention the key number(s) or trend. No preamble, just the summary."""
+Reply like you're talking directly to them — 2-3 sentences, conversational tone, not a formal report. Mention the key number(s) or trend directly, as if you're pointing it out to a colleague. You can start naturally (e.g. "Looks like...", "So...", "Here's what stands out...") instead of a dry restatement of the question."""
     resp = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         max_tokens=150,
@@ -229,20 +257,26 @@ def get_recent_context(n: int = 2):
 
 def process_question(q: str):
     """Runs a question through the pipeline and stores the result in history.
-    SQL is kept internally (still generated, still executed) but never shown to the user."""
+    SQL is kept internally (still generated, still executed) but never shown to the user.
+    Small talk / greetings are detected first and answered directly, without touching SQL at all."""
     context = get_recent_context()
     st.session_state.history.append(("user", q))
     if not client:
         sql, result, error, summary = None, None, "No GROQ_API_KEY found. Add it to .streamlit/secrets.toml to enable the chatbot.", None
     else:
         with st.spinner("Thinking..."):
-            sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
-            summary = None
-            if result is not None and not result.empty:
-                try:
-                    summary = summarize_result(q, result)
-                except Exception:
-                    summary = None
+            chat_reply = route_message(q, context=context)
+            if chat_reply is not None:
+                # Small talk — just a conversational reply, no SQL, no table, no chart
+                sql, result, error, summary = None, None, None, chat_reply
+            else:
+                sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
+                summary = None
+                if result is not None and not result.empty:
+                    try:
+                        summary = summarize_result(q, result)
+                    except Exception:
+                        summary = None
     st.session_state.history.append(("assistant", sql, result, error, summary))
 
 def swap_suggestion(slot_index: int, clicked_question: str):
@@ -260,6 +294,9 @@ def swap_suggestion(slot_index: int, clicked_question: str):
 tab_chat, tab_forecast = st.tabs(["💬 Ask a Question", "📈 Forecast"])
 
 with tab_chat:
+    if not st.session_state.history:
+        with st.chat_message("assistant"):
+            st.write("Hey! I'm ChatBI 👋 Ask me anything about your data — totals, trends, comparisons, whatever you're curious about. I can also forecast a metric forward if you head to the Forecast tab.")
     for entry in st.session_state.history:
         if entry[0] == "user":
             with st.chat_message("user"):
@@ -269,14 +306,17 @@ with tab_chat:
             with st.chat_message("assistant"):
                 if error:
                     st.error(error)
-                if result is not None:
+                elif result is not None:
                     if summary:
-                        st.markdown(f"**Summary:** {summary}")
+                        st.write(summary)
                     st.dataframe(result, use_container_width=True)
                     numeric_cols = result.select_dtypes("number").columns
                     if len(result.columns) >= 2 and len(numeric_cols) >= 1:
                         label_col = [c for c in result.columns if c not in numeric_cols][0] if len(result.columns) > len(numeric_cols) else result.columns[0]
                         st.bar_chart(result, x=label_col, y=numeric_cols[0])
+                elif summary:
+                    # small talk / conversational reply — no data attached
+                    st.write(summary)
 
 with tab_forecast:
     st.subheader("Forecast a metric forward in time")
