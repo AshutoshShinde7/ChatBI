@@ -4,6 +4,7 @@ import numpy as np
 import sqlite3
 import re
 import os
+import io
 from groq import Groq
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
@@ -187,26 +188,54 @@ If it's NOT a data question, reply like a real person texting back — don't reu
 
 # ---------- RESULT SUMMARY (uses a smaller/faster model — cheaper for a simple task) ----------
 def summarize_result(question: str, df: pd.DataFrame) -> str:
-    preview = df.head(20).to_csv(index=False)
-    prompt = f"""You're ChatBI, texting someone the answer to a question about their data. They asked: "{question}"
+    if df.empty:
+        result_str = "(no matching records found)"
+    else:
+        result_str = df.head(20).to_string(index=False)
 
-Here's what the query returned (CSV, up to 20 rows):
-{preview}
+    prompt = f"""You are ChatBI, a friendly business intelligence assistant.
+The user's question has already been answered by querying the database.
+You are given:
+1. The user's original question.
+2. The filtered query result.
+3. Information that an Excel file containing the complete filtered data has already been created by the application.
+Your job is to:
+- Read the result carefully.
+- Write a short conversational summary (2–4 sentences).
+- Sound natural, friendly, and human.
+- Use contractions like "it's", "there's", "you're", "looks like", etc.
+- Mention interesting trends, totals, highest/lowest values, or anything notable if present.
+- Don't simply restate every row.
+- Don't sound like a report or use corporate language.
+- If the result has only one row, answer naturally without saying "table".
+- If the result is empty, politely tell the user that no matching records were found.
+- Never mention SQL, databases, queries, or technical implementation.
+- Do not invent numbers that aren't present.
+- At the end, let the user know that the complete filtered data is available as an Excel download.
+Examples of the ending:
+- "I've also prepared an Excel file with the filtered results—you can download it below."
+- "If you'd like to work with the data further, the filtered results are available as an Excel download."
+- "I've included an Excel export of these filtered records below."
+User Question:
+{question}
+Filtered Result:
+{result_str}
+Response:"""
 
-Tell them what it shows, like you're glancing at the numbers and casually pointing out what matters — 1-3 sentences. Rules:
-- Use contractions and everyday words
-- Lead with the actual number or finding, not a restatement of their question
-- No corporate/report phrasing — avoid "the data indicates", "it can be observed that", "in summary", "overall"
-- Don't repeat the question back to them
-- If something stands out (a big gap, a surprising leader, a clear trend), react to it naturally instead of just listing facts
-- Vary how you open — don't always start with the same word or phrase"""
     resp = client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        max_tokens=150,
+        max_tokens=200,
         temperature=1.0,
         messages=[{"role": "user", "content": prompt}],
     )
     return resp.choices[0].message.content.strip()
+
+# ---------- EXCEL EXPORT (backs up the summary's promise of a downloadable file) ----------
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Results")
+    return buffer.getvalue()
 
 # ---------- FORECASTING ----------
 def make_forecast(df: pd.DataFrame, date_col: str, value_col: str, periods: int, freq: str):
@@ -319,7 +348,7 @@ def process_question(q: str):
             else:
                 sql, result, error = run_query_with_retry(q, schema_df, conn, context=context)
                 summary = None
-                if result is not None and not result.empty:
+                if result is not None:
                     try:
                         summary = summarize_result(q, result)
                     except Exception:
@@ -344,7 +373,7 @@ with tab_chat:
     if not st.session_state.history:
         with st.chat_message("assistant"):
             st.write("Hey! Ask me anything about your data — I'll dig up the numbers. There's also a Forecast tab if you want to project something forward.")
-    for entry in st.session_state.history:
+    for idx, entry in enumerate(st.session_state.history):
         if entry[0] == "user":
             with st.chat_message("user"):
                 st.write(entry[1])
@@ -353,7 +382,7 @@ with tab_chat:
             with st.chat_message("assistant"):
                 if error:
                     st.error(error)
-                elif result is not None:
+                elif result is not None and not result.empty:
                     if summary:
                         st.write(summary)
                     st.dataframe(result, use_container_width=True)
@@ -361,6 +390,17 @@ with tab_chat:
                     if len(result.columns) >= 2 and len(numeric_cols) >= 1:
                         label_col = [c for c in result.columns if c not in numeric_cols][0] if len(result.columns) > len(numeric_cols) else result.columns[0]
                         st.bar_chart(result, x=label_col, y=numeric_cols[0])
+                    st.download_button(
+                        "⬇️ Download as Excel",
+                        data=to_excel_bytes(result),
+                        file_name="chatbi_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_{idx}",
+                    )
+                elif result is not None and result.empty:
+                    # empty result — the summary already explains this conversationally, no table/download needed
+                    if summary:
+                        st.write(summary)
                 elif summary:
                     # small talk / conversational reply — no data attached
                     st.write(summary)

@@ -3,3 +3,4 @@ pandas>=2.2
 groq>=0.11
 scikit-learn>=1.4
 numpy>=1.26
+openpyxl>=3.1
