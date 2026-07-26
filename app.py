@@ -373,7 +373,7 @@ with tab_chat:
     if not st.session_state.history:
         with st.chat_message("assistant"):
             st.write(
-                "Hey! This is a demo project — the sample data is a retail sales dataset "
+                "Hey! This is a demo project developed by Ashutosh Shinde — the sample data is a retail sales dataset "
                 "(orders, products, customers, regions, sales and profit figures). Upload your own CSV in the sidebar "
                 "if you'd rather explore your own data instead.\n\n"
                 "I can answer things like totals and breakdowns (\"total sales by region\"), rankings (\"top 5 products by sales\"), "
