@@ -372,7 +372,14 @@ tab_chat, tab_forecast = st.tabs(["💬 Ask a Question", "📈 Forecast"])
 with tab_chat:
     if not st.session_state.history:
         with st.chat_message("assistant"):
-            st.write("Hey! Ask me anything about your data — I'll dig up the numbers. There's also a Forecast tab if you want to project something forward.")
+            st.write(
+                "Hey! This is a demo project — the sample data is a retail sales dataset "
+                "(orders, products, customers, regions, sales and profit figures). Upload your own CSV in the sidebar "
+                "if you'd rather explore your own data instead.\n\n"
+                "I can answer things like totals and breakdowns (\"total sales by region\"), rankings (\"top 5 products by sales\"), "
+                "trends over time (\"sales by month\"), and comparisons (\"which category has the highest profit\"). "
+                "There's also a Forecast tab if you want to project a metric forward in time."
+            )
     for idx, entry in enumerate(st.session_state.history):
         if entry[0] == "user":
             with st.chat_message("user"):
